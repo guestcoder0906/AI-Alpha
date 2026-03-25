@@ -45,12 +45,11 @@ export async function POST(req: NextRequest) {
     const systemInstruction = `You are AI-Alpha, a smart AI research assistant. 
 You support smart deep custom multistep thinking, reading multi-page Google search results via URL checking, Google Maps, and Earth Engine integration.
 For reverse image search, deeply analyze the attached image visually and form conclusions. 
-You have the following tools:
+You have the following tools available in reasoninig phases:
 1. earth_engine_query: Execute specific Earth Engine tasks.
-2. googleSearch: Built-in grounding tool for Google Search (automatically used when needed).
-3. fetch_url_content: Fetch text from a specific URL if you need to read a webpage deeply.
-Use deep chain-of-thought recursively by utilizing fetch_url_content on links returned by your knowledge or search.
-Always attach all sources as a referenced list at the end of your response. Give comprehensive analysis. Do not hallucinate URLs.`;
+2. googleSearch: Built-in grounding tool for Google Search.
+3. fetch_url_content: Fetch text from a specific URL.
+If you find results, summarize them clearly at the end. Use your search tools sequentially to avoid quota errors.`;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -58,20 +57,52 @@ Always attach all sources as a referenced list at the end of your response. Give
         const sendStatus = (msg: string) => controller.enqueue(encoder.encode(JSON.stringify({ type: "status", data: msg }) + "\n"));
         const sendText = (chunk: string) => controller.enqueue(encoder.encode(JSON.stringify({ type: "text", data: chunk }) + "\n"));
 
-        sendStatus(`Booting Deep Thinking on ${model}...`);
+        sendStatus(`Connecting to AI-Alpha Engine (${model})...`);
 
         let currentMessages = [...messages];
         let maxLoops = 6;
         let loopCount = 0;
         let isDone = false;
+        
+        // Tool definition shared
+        const tools: any[] = [
+          { googleSearch: {} },
+          {
+            functionDeclarations: [
+              {
+                name: "earth_engine_query",
+                description: "Execute a Google Earth Engine query to generate map tiles or perform geospatial analysis.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    taskType: { type: "STRING", description: "'generate_dem' or 'run_custom_script'" },
+                    script: { type: "STRING", description: "Node.js Earth Engine code here stringified. Must evaluate to promise/value." }
+                  },
+                  required: ["taskType"]
+                }
+              },
+              {
+                name: "fetch_url_content",
+                description: "Fetch and parse the readable text content of a specific URL.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    url: { type: "STRING", description: "The specific http/https URL to parse." }
+                  },
+                  required: ["url"]
+                }
+              }
+            ]
+          }
+        ];
 
         try {
           while (!isDone && loopCount < maxLoops) {
             loopCount++;
 
-            // Context window management: Keep initial system turn + latest history
-            if (currentMessages.length > 15) {
-              currentMessages = [currentMessages[0], ...currentMessages.slice(-10)];
+            if (loopCount > 1) {
+              sendStatus("Analyzing discoveries...");
+              await new Promise(r => setTimeout(r, 1500));
             }
 
             let hasFunctionCallThisLoop = false;
@@ -82,54 +113,46 @@ Always attach all sources as a referenced list at the end of your response. Give
 
             while (!success && retryCount < maxRetries) {
               try {
+                // To save quota/tokens, if it's the first loop we encourage tools.
+                // If it's the last loop possible, we block tools to get a final answer.
+                const isFinalAttempt = (loopCount === maxLoops);
+                
                 // @ts-ignore
                 const responseStream = await ai.models.generateContentStream({
                   model: model,
                   contents: currentMessages,
                   config: {
                     systemInstruction: systemInstruction,
+                    // Only provide tools if we aren't at the limit
                     // @ts-ignore
-                    tools: loopCount < 5 ? [
-                      { googleSearch: {} },
-                      {
-                        functionDeclarations: [
-                          {
-                            name: "earth_engine_query",
-                            description: "Execute Earth Engine tasks.",
-                            parameters: {
-                              type: "OBJECT",
-                              properties: { taskType: { type: "STRING" }, script: { type: "STRING" } },
-                              required: ["taskType"]
-                            }
-                          },
-                          {
-                            name: "fetch_url_content",
-                            description: "Fetch URL text.",
-                            parameters: {
-                              type: "OBJECT",
-                              properties: { url: { type: "STRING" } },
-                              required: ["url"]
-                            }
-                          }
-                        ]
-                      }
-                    ] : []
+                    tools: isFinalAttempt ? [] : tools,
+                    // If we are on final attempt, force it to answer as text
+                    // @ts-ignore
+                    toolConfig: isFinalAttempt ? { functionCallingConfig: { mode: "NONE" } } : undefined
                   }
                 });
 
                 for await (const chunk of responseStream) {
                   if (chunk.functionCalls && chunk.functionCalls.length > 0) {
                     hasFunctionCallThisLoop = true;
-                    for (const call of chunk.functionCalls) {
-                      finalParts.push({ functionCall: call });
-                      const toolResult = await executeCustomTool(call, sendStatus, sendText);
-                      
-                      currentMessages.push({ role: "model", parts: [{ functionCall: call }] });
-                      currentMessages.push({
-                        role: "user",
-                        parts: [{ functionResponse: { name: call.name, response: toolResult } }]
-                      });
-                    }
+                    // For rate limit safety, we only process the FIRST function call if multiple returned
+                    const call = chunk.functionCalls[0];
+                    finalParts.push({ functionCall: call });
+                    
+                    const toolResult = await executeCustomTool(call, sendStatus, sendText);
+                    
+                    currentMessages.push({ role: "model", parts: [{ functionCall: call }] });
+                    currentMessages.push({
+                      role: "user",
+                      parts: [{
+                        functionResponse: {
+                          name: call.name,
+                          response: toolResult
+                        }
+                      }]
+                    });
+                    // Break out of chunk processing to re-verify with model sequentially
+                    break;
                   }
                   if (chunk.text) {
                     sendText(chunk.text);
@@ -138,10 +161,10 @@ Always attach all sources as a referenced list at the end of your response. Give
                 }
                 success = true;
               } catch (err: any) {
-                if (err.message?.includes("429") || err.message?.includes("quota")) {
+                if (err.message?.includes("429") || err.message?.includes("Quota")) {
                   retryCount++;
-                  const delay = 3000 * retryCount;
-                  sendStatus(`Pacing... (${delay/1000}s)`);
+                  const delay = 5000 * retryCount;
+                  sendStatus(`Engine busy, retrying in ${delay / 1000}s...`);
                   await new Promise(r => setTimeout(r, delay));
                 } else {
                   throw err;
@@ -149,20 +172,18 @@ Always attach all sources as a referenced list at the end of your response. Give
               }
             }
 
-            if (!success || !hasFunctionCallThisLoop) {
+            if (!success) throw new Error("API Limit Reached");
+
+            if (!hasFunctionCallThisLoop) {
               isDone = true;
-              if (finalParts.length > 0) {
-                currentMessages.push({ role: "model", parts: finalParts });
-              }
-            } else {
-              await new Promise(r => setTimeout(r, 1000));
             }
           }
         } catch (e: any) {
-          sendText(`\n\n*(Error: ${e.message})*`);
+          sendStatus("Error: " + e.message);
+          sendText("\n\n(AI-Alpha Engine Error: " + e.message + ". Please try again in 30 seconds)");
         }
 
-        sendStatus("Processing complete.");
+        sendStatus("Research task completed.");
         controller.close();
       }
     });
