@@ -83,12 +83,17 @@ Always attach all sources as a referenced list at the end of your response. Give
 
             while (!success && retryCount < maxRetries) {
               try {
+                // Determine if we should allow tools in this specific sub-call
+                // If we are just concluding (no function calls in prev loop), we can sometimes skip tools
+                // but for this implementation, we keep tools available but handle the request strictly sequentially.
+                
                 // @ts-ignore
                 const responseStream = await ai.models.generateContentStream({
                   model: model,
                   contents: currentMessages,
                   config: {
                     systemInstruction: systemInstruction,
+                    // If we've already done tool calls and are just finishing, or to be efficient:
                     // @ts-ignore
                     tools: [
                       { googleSearch: {} },
@@ -123,11 +128,14 @@ Always attach all sources as a referenced list at the end of your response. Give
                   }
                 });
 
+                // Consume the stream fully and sequentially
                 for await (const chunk of responseStream) {
+                  // If we detect function calls, we process them one by one
                   if (chunk.functionCalls && chunk.functionCalls.length > 0) {
                     hasFunctionCallThisLoop = true;
                     for (const call of chunk.functionCalls) {
                       finalParts.push({ functionCall: call });
+                      // Sequential tool execution
                       const toolResult = await executeCustomTool(call, sendStatus, sendText);
                       
                       currentMessages.push({ role: "model", parts: [{ functionCall: call }] });
@@ -151,11 +159,12 @@ Always attach all sources as a referenced list at the end of your response. Give
               } catch (err: any) {
                 if (err.message?.includes("429") || err.message?.includes("Too Many Requests")) {
                   retryCount++;
-                  const delay = 2000 * Math.pow(2, retryCount); // Exponential backoff
-                  sendStatus(`Rate limited. Retrying in ${delay/1000}s... (Attempt ${retryCount}/${maxRetries})`);
+                  // Base delay of 4s for rate limits to be safer
+                  const delay = 4000 * Math.pow(2, retryCount); 
+                  sendStatus(`Rate limited. Waiting ${delay/1000}s...`);
                   await new Promise(r => setTimeout(r, delay));
                 } else {
-                  throw err; // Non-rate-limit error, abort retry
+                  throw err;
                 }
               }
             }
