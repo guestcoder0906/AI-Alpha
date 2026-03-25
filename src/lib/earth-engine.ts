@@ -11,10 +11,14 @@ export async function initEarthEngine(): Promise<void> {
 
   initPromise = new Promise((resolve, reject) => {
     try {
-      const keyPath = process.env.EE_PRIVATE_KEY_PATH || 'gen-lang-client-0982648087-9a55b6b1926a.json';
-      const absoluteKeyPath = path.resolve(process.cwd(), keyPath);
-      
-      const privateKey = JSON.parse(fs.readFileSync(absoluteKeyPath, 'utf8'));
+      let privateKey;
+      if (process.env.EE_PRIVATE_KEY_JSON) {
+        privateKey = JSON.parse(process.env.EE_PRIVATE_KEY_JSON);
+      } else {
+        const keyPath = process.env.EE_PRIVATE_KEY_PATH || 'gen-lang-client-0982648087-9a55b6b1926a.json';
+        const absoluteKeyPath = path.resolve(process.cwd(), keyPath);
+        privateKey = JSON.parse(fs.readFileSync(absoluteKeyPath, 'utf8'));
+      }
 
       ee.data.authenticateViaPrivateKey(
         privateKey,
