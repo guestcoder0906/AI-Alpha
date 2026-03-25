@@ -68,8 +68,8 @@ Always attach all sources as a referenced list at the end of your response. Give
         try {
           while (!isDone && loopCount < maxLoops) {
             loopCount++;
-            let hasFunctionCall = false;
-            let currentModelParts: any[] = [];
+            let hasFunctionCallThisLoop = false;
+            let currentTurnParts: any[] = [];
             
             // @ts-ignore
             const responseStream = await ai.models.generateContentStream({
@@ -111,16 +111,17 @@ Always attach all sources as a referenced list at the end of your response. Give
               }
             });
 
+            let finalParts: any[] = [];
             for await (const chunk of responseStream) {
               if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-                hasFunctionCall = true;
+                hasFunctionCallThisLoop = true;
                 for (const call of chunk.functionCalls) {
-                  currentModelParts.push({ functionCall: call });
+                  finalParts.push({ functionCall: call });
                   const toolResult = await executeCustomTool(call, sendStatus, sendText);
                   
-                  // Append model turn with functionCall
-                  currentMessages.push({ role: "model", parts: currentModelParts });
-                  // Append user turn with functionResponse
+                  // Need to immediately add this tool result to the conversation for the next iteration
+                  // The format is: model turn with calls, then user turn with responses
+                  currentMessages.push({ role: "model", parts: [{ functionCall: call }] });
                   currentMessages.push({
                     role: "user",
                     parts: [{
@@ -132,24 +133,30 @@ Always attach all sources as a referenced list at the end of your response. Give
                   });
                 }
               }
-              if (chunk.text && !hasFunctionCall) {
+              if (chunk.text) {
                 sendText(chunk.text);
+                finalParts.push({ text: chunk.text });
               }
             }
 
-            if (!hasFunctionCall) {
+            if (!hasFunctionCallThisLoop) {
               isDone = true;
+              // If we didn't have function calls, ensure we capture the text if any
+              if (finalParts.length > 0) {
+                currentMessages.push({ role: "model", parts: finalParts });
+              }
             } else {
-              sendStatus("Analyzing multi-step tool results...");
+              sendStatus("Analyzing results...");
             }
           }
           
           if (loopCount >= maxLoops && !isDone) {
-            sendText("\n\n*Max thinking steps reached. Returning partial findings.*");
+            sendText("\n\n*Max reasoning steps reached.*");
           }
           
         } catch (e: any) {
-           sendStatus("Model Error: " + e.message);
+           sendStatus("Error: " + e.message);
+           sendText("\n\n(Session Error: " + e.message + ")");
         }
         
         sendStatus("Processing complete.");
