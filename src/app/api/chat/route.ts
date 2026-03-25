@@ -69,10 +69,10 @@ Always attach all sources as a referenced list at the end of your response. Give
           while (!isDone && loopCount < maxLoops) {
             loopCount++;
             
-            // Add a small delay between steps to avoid rapid-fire rate limits
+            // Add a 5-second delay between steps to avoid rapid-fire rate limits
             if (loopCount > 1) {
-              sendStatus("Thinking...");
-              await new Promise(r => setTimeout(r, 2000));
+              sendStatus("Refining analysis (5s pause to prevent rate limits)...");
+              await new Promise(r => setTimeout(r, 5000));
             }
 
             let hasFunctionCallThisLoop = false;
