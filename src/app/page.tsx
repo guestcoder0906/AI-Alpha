@@ -55,28 +55,27 @@ export default function Home() {
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      const newAttachments: AttachedMedia[] = [];
-      for (let i = 0; i < e.target.files.length; i++) {
-        const file = e.target.files[i];
-        
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const result = event.target?.result as string;
-          const base64Data = result.split(',')[1];
-          newAttachments.push({
-            url: URL.createObjectURL(file),
-            mimeType: file.type || "application/octet-stream",
-            data: base64Data,
-            name: file.name
+      const files = Array.from(e.target.files);
+      const newAttachments: AttachedMedia[] = await Promise.all(
+        files.map((file) => {
+          return new Promise<AttachedMedia>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+              const result = event.target?.result as string;
+              const base64Data = result.split(",")[1];
+              resolve({
+                url: URL.createObjectURL(file),
+                mimeType: file.type || "application/octet-stream",
+                data: base64Data,
+                name: file.name,
+              });
+            };
+            reader.readAsDataURL(file);
           });
-          if (newAttachments.length === e.target.files!.length) {
-            setAttachments((prev) => [...prev, ...newAttachments]);
-          }
-        };
-        reader.readAsDataURL(file);
-      }
+        })
+      );
+      setAttachments((prev) => [...prev, ...newAttachments]);
     }
-    // reset input
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
