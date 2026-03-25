@@ -68,80 +68,104 @@ Always attach all sources as a referenced list at the end of your response. Give
         try {
           while (!isDone && loopCount < maxLoops) {
             loopCount++;
-            let hasFunctionCallThisLoop = false;
-            let currentTurnParts: any[] = [];
             
-            // @ts-ignore
-            const responseStream = await ai.models.generateContentStream({
-              model: model,
-              contents: currentMessages,
-              config: {
-                systemInstruction: systemInstruction,
+            // Add a small delay between steps to avoid rapid-fire rate limits
+            if (loopCount > 1) {
+              sendStatus("Thinking...");
+              await new Promise(r => setTimeout(r, 2000));
+            }
+
+            let hasFunctionCallThisLoop = false;
+            let finalParts: any[] = [];
+            let retryCount = 0;
+            const maxRetries = 3;
+            let success = false;
+
+            while (!success && retryCount < maxRetries) {
+              try {
                 // @ts-ignore
-                tools: [
-                  { googleSearch: {} },
-                  {
-                    functionDeclarations: [
+                const responseStream = await ai.models.generateContentStream({
+                  model: model,
+                  contents: currentMessages,
+                  config: {
+                    systemInstruction: systemInstruction,
+                    // @ts-ignore
+                    tools: [
+                      { googleSearch: {} },
                       {
-                        name: "earth_engine_query",
-                        description: "Execute a Google Earth Engine query to generate map tiles or perform geospatial analysis.",
-                        parameters: {
-                          type: "OBJECT",
-                          properties: {
-                            taskType: { type: "STRING", description: "'generate_dem' or 'run_custom_script'" },
-                            script: { type: "STRING", description: "Node.js Earth Engine code here stringified. Must evaluate to promise/value." }
+                        functionDeclarations: [
+                          {
+                            name: "earth_engine_query",
+                            description: "Execute a Google Earth Engine query to generate map tiles or perform geospatial analysis.",
+                            parameters: {
+                              type: "OBJECT",
+                              properties: {
+                                taskType: { type: "STRING", description: "'generate_dem' or 'run_custom_script'" },
+                                script: { type: "STRING", description: "Node.js Earth Engine code here stringified. Must evaluate to promise/value." }
+                              },
+                              required: ["taskType"]
+                            }
                           },
-                          required: ["taskType"]
-                        }
-                      },
-                      {
-                        name: "fetch_url_content",
-                        description: "Fetch and parse the readable text content of a specific URL.",
-                        parameters: {
-                          type: "OBJECT",
-                          properties: {
-                            url: { type: "STRING", description: "The specific http/https URL to parse." }
-                          },
-                          required: ["url"]
-                        }
+                          {
+                            name: "fetch_url_content",
+                            description: "Fetch and parse the readable text content of a specific URL.",
+                            parameters: {
+                              type: "OBJECT",
+                              properties: {
+                                url: { type: "STRING", description: "The specific http/https URL to parse." }
+                              },
+                              required: ["url"]
+                            }
+                          }
+                        ]
                       }
                     ]
                   }
-                ]
-              }
-            });
+                });
 
-            let finalParts: any[] = [];
-            for await (const chunk of responseStream) {
-              if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-                hasFunctionCallThisLoop = true;
-                for (const call of chunk.functionCalls) {
-                  finalParts.push({ functionCall: call });
-                  const toolResult = await executeCustomTool(call, sendStatus, sendText);
-                  
-                  // Need to immediately add this tool result to the conversation for the next iteration
-                  // The format is: model turn with calls, then user turn with responses
-                  currentMessages.push({ role: "model", parts: [{ functionCall: call }] });
-                  currentMessages.push({
-                    role: "user",
-                    parts: [{
-                      functionResponse: {
-                        name: call.name,
-                        response: toolResult
-                      }
-                    }]
-                  });
+                for await (const chunk of responseStream) {
+                  if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+                    hasFunctionCallThisLoop = true;
+                    for (const call of chunk.functionCalls) {
+                      finalParts.push({ functionCall: call });
+                      const toolResult = await executeCustomTool(call, sendStatus, sendText);
+                      
+                      currentMessages.push({ role: "model", parts: [{ functionCall: call }] });
+                      currentMessages.push({
+                        role: "user",
+                        parts: [{
+                          functionResponse: {
+                            name: call.name,
+                            response: toolResult
+                          }
+                        }]
+                      });
+                    }
+                  }
+                  if (chunk.text) {
+                    sendText(chunk.text);
+                    finalParts.push({ text: chunk.text });
+                  }
+                }
+                success = true;
+              } catch (err: any) {
+                if (err.message?.includes("429") || err.message?.includes("Too Many Requests")) {
+                  retryCount++;
+                  const delay = 2000 * Math.pow(2, retryCount); // Exponential backoff
+                  sendStatus(`Rate limited. Retrying in ${delay/1000}s... (Attempt ${retryCount}/${maxRetries})`);
+                  await new Promise(r => setTimeout(r, delay));
+                } else {
+                  throw err; // Non-rate-limit error, abort retry
                 }
               }
-              if (chunk.text) {
-                sendText(chunk.text);
-                finalParts.push({ text: chunk.text });
-              }
+            }
+
+            if (!success) {
+              throw new Error("Persistent rate limit failure after retries.");
             }
 
             if (!hasFunctionCallThisLoop) {
               isDone = true;
-              // If we didn't have function calls, ensure we capture the text if any
               if (finalParts.length > 0) {
                 currentMessages.push({ role: "model", parts: finalParts });
               }
